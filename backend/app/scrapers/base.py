@@ -41,7 +41,7 @@ class BaseScraper(abc.ABC):
 
         if client is not None:
             self.client: httpx.AsyncClient = client
-            self._owns_client = bool = False
+            self._owns_client: bool = False
         else:
             self.client = httpx.AsyncClient(headers=merged_headers, timeout=timeout)
             self._owns_client = True
@@ -77,11 +77,11 @@ class BaseScraper(abc.ABC):
             self,
             url: str,
             *,
-            parms: Optional[Dict[str, Any]] = None,
+            params: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
     ) -> Optional[httpx.Response]:
         try:
-            response = await self.client.get(url, params=parms, **kwargs)
+            response = await self.client.get(url, params=params, **kwargs)
             return response
         except httpx.TimeoutException:
             logger.warning(
@@ -98,9 +98,35 @@ class BaseScraper(abc.ABC):
                 exc,
             )
             return None
-        
 
-    @abc.abstractclassmethod
+    async def _safe_post(
+            self,
+            url: str,
+            *,
+            params: Optional[Dict[str, Any]] = None,
+            **kwargs,
+    ) -> Optional[httpx.Response]:
+        try:
+            response = await self.client.post(url, params=params, **kwargs)
+            return response
+        except httpx.TimeoutException:
+            logger.warning(
+                "Timeout while fetching '%s' for scraper '%s'",
+                url,
+                self.source_name,
+            )
+            return None
+        except httpx.HTTPError as exc:
+            logger.error(
+                "Network error while fetching '%s' for scraper '%s': %s",
+                url,
+                self.source_name,
+                exc,
+            )
+            return None
+
+
+    @abc.abstractmethod
     async def fetch_raw_jobs(
         self,
         page_size: int = 30,
@@ -108,7 +134,7 @@ class BaseScraper(abc.ABC):
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
     
-    @abc.abstractclassmethod
+    @abc.abstractmethod
     def parse_job_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
     
