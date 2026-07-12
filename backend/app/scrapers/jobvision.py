@@ -11,7 +11,7 @@ from app.scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 LIST_URL: str = "https://candidateapi.jobvision.ir/api/v1/JobPost/List"
-DETAIL_URL: str = "https://candidateapi.jobvision.ir/api/v1/JobPost/Recommendation/Similar"
+DETAIL_URL: str = "https://candidateapi.jobvision.ir/api/v1/JobPost/Detail?jobPostId="
 
 
 
