@@ -6,9 +6,8 @@ from app.models.association import JobKeywordLink
 
 class SearchKeyword(SQLModel, table=True):
     __tablename__ = "search_keywords"
+
     id: Optional[int] = Field(default=None, primary_key=True)
     keyword: str = Field(index=True, unique=True)
-    last_scraped_at: Optional[datetime] = Field(default=None)
-    
-    # Relationship with the ads table
+    last_scraped_at: Optional[datetime] = Field(default=None) 
     jobs: List["Job"] = Relationship(back_populates="keywords", link_model=JobKeywordLink)
