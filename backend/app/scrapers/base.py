@@ -60,10 +60,10 @@ class BaseScraper(abc.ABC):
 
         if client is not None:
             self.client: httpx.AsyncClient = client
-            self._own_client: bool = False
+            self._owns_client: bool = False
         else:
             self.client= httpx.AsyncClient(headers=merged_headers, timeout=timeout)
-            self._own_client = True
+            self._owns_client = True
 
         logger.info(
             "Initialized scraper '%s' (owns_client=%s, request_delay=%.2f)",
@@ -79,7 +79,7 @@ class BaseScraper(abc.ABC):
         await self.close()
 
     async def close(self) -> None:
-        if self._own_client and not self.client.is_closed:
+        if self._owns_client and not self.client.is_closed:
             await self.client.aclose()
             logger.info("Closed HTTP client for scraper '%s'", self.source_name)
     
@@ -135,5 +135,5 @@ class BaseScraper(abc.ABC):
     async def fetch_detail(self, platform_job_id: str) -> Optional[JobDetail]:
         raise NotImplementedError
     
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<{self.__class__.__name__} source='{self.source_name}'>"
