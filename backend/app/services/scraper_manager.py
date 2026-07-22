@@ -130,4 +130,81 @@ class ScraperManager:
 
 
 
-        
+    async def run_enrichment(self, session: AsyncSession) -> None:
+        jobs = await self._get_jobs_needing_enrichment(session)
+        logger.info("Found %d job(s) needing enrichment", len(jobs))
+
+        for job in jobs:
+            scraper = self.scrapers.get(job.platform)
+            if scraper is None:
+                logger.error("No scraper registered for platform '%s'", job.platform)
+                job.status = JobStatus.FAILED
+                session.add(job)
+                await session.commit()
+                continue
+
+            detail = await scraper.fetch_detail(job.platform_job_id)
+            if detail is None:
+                job.status = JobStatus.FAILED
+                session.add(job)
+                session.commit()
+                continue
+
+            new_hash = self._compute_content_hash(detail.title, detail.description, detail.salary)
+
+            if job.status == JobStatus.NEEDS_RECHECK and new_hash == job.content_hash:
+                job.status =  JobStatus.ENRICHED
+                job.scraped_at = datetime.utcnow()
+                session.add(job)
+                await session.commit()
+                logger.info(
+                    "Job %s unchanged after recheck, skipped AI pipeline", job.platform_job_id
+                )
+                continue
+
+            try:
+                extracted = await self.ai_analyzer.extract_structured(detail.description)
+                vector = await self.ai_analyzer.embed_skills(
+                    extracted.get("tools_and_technologies", [])
+                )
+            except Exception: # noqa: BELE001
+                logger. exception("AI pipeline failed for job_id=%s", job.platform_job_id)
+                job.status = JobStatus.FAILED
+                session.add(job)
+                await session.commit()
+                continue
+
+            job.title = detail.title
+            job.description = detail.description
+            job.company_name = detail.company_name
+            job.company_about = detail.company_about
+            job.salary = detail.salary
+            job.location = detail.location
+
+            job.tools_and_technologies = extracted.get("tools_and_technologies", [])
+            job.competencies = extracted.get("competencies", [])
+            job.soft_skills = extracted.get = extracted.get("soft_skills", [])
+            job.domain = extracted.get("domain")
+            job.seniority_level = extracted.get("seniority_level", "unspecified")
+            job.skills_vector = vector
+
+            job.content_hash = new_hash
+            job.scraped_at = datetime.utcnow()
+            job.status = JobStatus.ENRICHED
+
+            session.add(job)
+            await session.commit()
+            logger.info("Enriched job_id=%s (%s)", job.platform_job_id, job.title)
+
+    async def _get_jobs_needing_enrichment(self, session: AsyncSession) -> List[Job]:
+        result = await session.execute(
+            select(Job).where(
+                Job.status.in_([JobStatus.PENDING_DETAIL, JobStatus.NEEDS_RECHECK])
+            )
+        )
+        return list(result.scalars().all())
+    
+    @staticmethod
+    def _compute_content_hash(title: str, description: str, salary: Optional[str]) -> str:
+        raw = f"{title}|{description}|{salary or ''}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()     
