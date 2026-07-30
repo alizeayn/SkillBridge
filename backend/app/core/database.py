@@ -1,23 +1,39 @@
 from typing import AsyncGenerator
-from sqlmodel import SQLModel, create_engine, Session
-
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine
+)
+from sqlmodel import SQLModel
 from app.core.config import settings
 
 
-engine = create_engine(settings.DATABASE_URL, echo=True)
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.DATABASE_ECHO,
+    pool_pare_ping=True,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
 
 
-def create_db_and_tables() -> None:
-    """Create all database tables by importing models to register them with SQLModel metadata."""    
-    
-    import app.models.association  # noqa: F401
-    import app.models.job  # noqa: F401
-    import app.models.keyword  # noqa: F401
+def register_models() -> None:
+    import app.models.association # noqa: F401
+    import app.models.job # noqa: F401
+    import app.models # noqa F401
 
-    SQLModel.metadata.create_all(engine)
 
-async def get_session() -> AsyncGenerator[Session, None]:
-    """Get a new database session."""
-    with Session(engine) as session:
+async def init_db() -> None:
+    register_models()
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
         yield session
     
