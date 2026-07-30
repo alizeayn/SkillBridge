@@ -1,5 +1,4 @@
 from typing import List
-
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
