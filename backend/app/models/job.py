@@ -23,8 +23,8 @@ class Job(SQLModel, table=True):
     __tablename__= "jobs"
     __table_args__ = (
         UniqueConstraint(
-            "platform", "platform_id", name="uq_job_platform_id"
-        )
+            "platform", "platform_job_id", name="uq_job_platform_id"
+        ),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -48,10 +48,10 @@ class Job(SQLModel, table=True):
     competencies: Optional[List[str]] = Field(default=None, sa_column=Column(JSON))
     soft_skills: Optional[List[str]] = Field(default=None, sa_column=Column(JSON))
     domain: Optional[str] = Field(default=None)
-    seniority_level: Optional[str] = Field(default="unspecified") 
+    seniority_level: Optional[str] = Field(default="unspecified")
     skills_vector: Optional[list] =Field(
         default=None,
-        sa_column=Column(Vector(2560))
+        sa_column=Column(Vector(4096))
     )                                                   
     keywords: List["SearchKeyword"] = Relationship(
         back_populates="jobs",
