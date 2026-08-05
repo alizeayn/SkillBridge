@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     app.state.ai_analyzer = ai_analyzer
     app.state.scraper_manager = manager
 
-    background_tasks = list[asyncio.Task] = []
+    background_tasks: list[asyncio.Task] = []
 
     if settings.SCHEDULER_ENABLED:
         logger.info(
