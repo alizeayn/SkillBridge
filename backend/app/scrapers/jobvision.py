@@ -1,11 +1,10 @@
 from __future__ import annotations
-
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-
 from bs4 import BeautifulSoup
-
+from httpx import Response
+from app.core.config import settings
 from app.scrapers.base import BaseScraper, JobSummary, JobDetail
 
 logger = logging.getLogger(__name__)
@@ -13,6 +12,7 @@ logger = logging.getLogger(__name__)
 LIST_URL: str = "https://candidateapi.jobvision.ir/api/v1/JobPost/List"
 DETAIL_URL: str = "https://candidateapi.jobvision.ir/api/v1/JobPost/Detail"
 
+DEFAULT_SORT_BY: int = 1
 
 class JobVisionScraper(BaseScraper):
     source_name: str = "jobvision"
@@ -22,14 +22,20 @@ class JobVisionScraper(BaseScraper):
             keyword: str,
             location: str,
             page: int,
-            page_size: int = 30,
+            page_size: Optional[int] = None,
     ) -> List[JobSummary]:
+        effective_page_size = (
+            page_size
+            if page_size is not None
+            else settings.SCRAPER_PAGE_SIZE
+        )
+
         payload: Dict[str, Any] = {
-            "pageSize": page_size,
+            "pageSize": effective_page_size,
             "requestedPage": page,
             "locationWrapper": location,
             "keyword": keyword,
-            "sortBy":1,
+            "sortBy":DEFAULT_SORT_BY,
             "searchID": None,
         }
 
@@ -48,13 +54,12 @@ class JobVisionScraper(BaseScraper):
             )
             return []
         
-        try:
-            payload_json: Dict[str, Any] = response.json()
-        except ValueError:
-            logger.error(
-                "Failed to decode JSON from List API (keyword='%s', page=%d) for '%s'",
-                keyword, page, self.source_name,
-            )
+        payload_json = self._safe_json(
+            response,
+            context="List API",
+            details=f"keyword='{keyword}', page={page}",
+        )
+        if payload_json is None:
             return []
         
         if not payload_json.get("isSuccess"):
@@ -76,7 +81,6 @@ class JobVisionScraper(BaseScraper):
             "Discovered %d job summaries (keyword='%s', page=%d) for '%s'",
             len(summaries), keyword, page, self.source_name,
         )
-        await self._throttle()
         return summaries
     
     def _parse_summary(self, item: Dict[str, Any]) -> Optional[JobSummary]:
@@ -121,13 +125,12 @@ class JobVisionScraper(BaseScraper):
             )
             return None
         
-        try:
-            payload_json: Dict[str, Any] = response.json()
-        except ValueError:
-            logger.error(
-                "Failed to decode JSON from Detail API (job_id=%s) for '%s'",
-                platform_job_id, self.source_name,
-            )
+        payload_json = self._safe_json(
+            response,
+            context="Detail API",
+            details=f"job_id={platform_job_id}",
+        )
+        if payload_json is None:
             return None
         
         if not payload_json.get("isSuccess"):
@@ -138,10 +141,8 @@ class JobVisionScraper(BaseScraper):
             return None
         
         data: Dict[str, Any] = payload_json.get("data") or {}
-        detail = self._parse_detail(data)
-
-        await self._throttle()
-        return detail
+        
+        return self._parse_detail(data)
     
     def _parse_detail(self, data:Dict[str, Any]) -> Optional[JobDetail]:
         job_id: Any = data.get("id")
@@ -163,7 +164,11 @@ class JobVisionScraper(BaseScraper):
         city_title: str = ((location_block.get("city") or {}).get("titleFa")) or ""
 
         salary_block: Optional[Dict[str, Any]] = data.get("salary")
-        salary_text: Optional[str] = salary_block.get("titleFa") if salary_block else None
+        salary_text: Optional[str] = (
+            salary_block.get("titleFa")
+            if isinstance(salary_block, dict)
+            else None
+        )
 
         return JobDetail(
             platform_job_id=str(job_id),
@@ -174,6 +179,35 @@ class JobVisionScraper(BaseScraper):
             salary=salary_text,
             location=city_title,
         )
+    
+    def _safe_json(
+            self,
+            response: Response,
+            *,
+            context: str,
+            details:str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.error(
+                "Failed to decode JSON from %s (%s, platform='%s')",
+                context,
+                details,
+                self.source_name,
+            )
+            return None
+        
+        if not isinstance(payload, dict):
+            logger.error(
+                "%s returned non-object JSON (%s, platform='%s')",
+                context,
+                details,
+                self.source_name,
+            )
+            return None
+        return payload
+
     
 
 
