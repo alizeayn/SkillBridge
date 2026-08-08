@@ -50,6 +50,7 @@ class Settings(BaseSettings):
 
     # Pipeline
     ENRICHMENT_CONCURRENCY: int = 10
+    ENRICHMENT_BATCH_SIZE: int = 100
     DEFAULT_LOCATION: str = "Tehran"
     DISCOVERY_KEYWORDS: List[str] = Field(
         default_factory=lambda: [
