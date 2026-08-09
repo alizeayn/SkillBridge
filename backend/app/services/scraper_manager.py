@@ -1,72 +1,194 @@
 from __future__ import annotations
-
+import asyncio
 import hashlib
 import logging
-from datetime import datetime
-from typing import List, Dict, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.models.association import JobKeywordLink
 from app.models.job import Job, JobStatus
 from app.models.keyword import SearchKeyword
-from app.models.association import JobKeywordLink
 from app.scrapers.base import BaseScraper, JobSummary
 from app.services.ai_analyzer import AIAnalyzer
+
+
 
 logger = logging.getLogger(__name__)
 
 
-class ScraperManager:
-    def __init__(self, scrapers: List[BaseScraper], ai_analyzer: AIAnalyzer) -> None:
-        self.scrapers: Dict[str, BaseScraper] = {s.source_name: s for s in scrapers}
-        self.ai_analyzer = ai_analyzer
+FAILED_OUTCOMES = {
+    "no_scraper",
+    "fetch_failed",
+    "ai_failed",
+    "failed",
+}
 
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc). replace(tzinfo=None)
+
+
+@dataclass
+class DiscoveryStats:
+    pages_fetched: int = 0
+    summaries_seen: int = 0
+    jobs_created: int = 0
+    jobs_updated: int = 0
+    links_added:  int = 0
+    errors: int = 0
+
+
+@dataclass
+class EnrichmentStats:
+    jobs_found: int = 0 
+    enriched: int = 0
+    unchanged: int = 0
+    failed: int = 0
+
+
+class ScraperManager:
+    def __init__(
+            self, 
+            scrapers: List[BaseScraper],
+            ai_analyzer: AIAnalyzer,
+    ) -> None:
+        self.scrapers: Dict[str, BaseScraper] = {
+            scraper.source_name: scraper for scraper in scrapers
+        }
+        self.ai_analyzer = ai_analyzer
+    
+    # Discovery
     async def run_discover(
             self,
             keywords: List[str],
             location: str,
             session: AsyncSession,
-    ) -> None:
+    ) -> DiscoveryStats:
+        total_stats = DiscoveryStats()
+
+        page_size = settings.SCRAPER_PAGE_SIZE
+        max_pages = settings.SCRAPER_MAX_PAGES
+
         for scraper in self.scrapers.values():
             for raw_keyword in keywords:
                 keyword = raw_keyword.strip()
-                keyword_row = await self._get_or_create_keyword(keyword, session)
 
-                page = 1
-                while True:
-                    summaries = await scraper.discover(keyword, location, page)
-                    if not summaries:
-                        break
+                if not keyword:
+                    continue
 
-                    for summary in summaries:
-                        await self._upsert_summary(
-                            platform=scraper.source_name,
-                            summary=summary,
-                            keyword_id=keyword_row.id,
-                            session=session,
+                stats = DiscoveryStats()
 
+                logger.info(
+                    "Discovery started: platform='%s' keyword='%s' location='%s'",
+                    scraper.source_name,
+                    keyword,
+                    location,
+                )
+
+                try:
+                    keyword_row = await self._get_or_create_keyword(
+                        keyword,
+                        session,
+                    )
+
+                    page = 1
+
+                    while page <= max_pages:
+                        summaries = await scraper.discover(
+                            keyword,
+                            location,
+                            page,
+                            page_size=page_size,
                         )
-                    page +=1
 
-                    keyword_row.last_scraped_at = datetime.utcnow()
+                        if not summaries:
+                            break
+
+                        stats.summaries_seen += len(summaries)
+
+                        for summary in summaries:
+                            created, link_created = await self._upsert_summary(
+                                platform=scraper.source_name,
+                                summary=summary,
+                                keyword_id=keyword_row.id,
+                                session=session,
+                            )
+
+                            if created:
+                                stats.jobs_created += 1
+                            else:
+                                stats.jobs_updated += 1
+                            
+                            if link_created:
+                                stats.links_added += 1
+                        await session.commit()
+                        stats.pages_fetched += 1
+
+                        if len(summaries) < page_size:
+                            break
+                        page += 1
+                    else:
+                        logger.warning(
+                            "Discovery stopped at max_pages=%d for keyword='%s' platform='%s'",
+                            max_pages,
+                            keyword,
+                            scraper.source_name,
+                        )
+                    
+                    keyword_row.last_scraped_at = _utcnow()
                     session.add(keyword_row)
-                    await session.commit
+                    await session.commit()
 
                     logger.info(
-                        "Discovery finished: keyword='%s' platform='%s'",
-                        keyword, scraper.source_name,
+                        "Discovery finished: platform='%s' keyword='%s' pages=%d summaries=%d created=%d updated=%d links=%d",
+                        scraper.source_name,
+                        keyword,
+                        stats.pages_fetched,
+                        stats.summaries_seen,
+                        stats.jobs_created,
+                        stats.jobs_updated,
+                        stats.links_added,
                     )
-    async def _get_or_create_keyword(self, keyword: str, session: AsyncSession) -> SearchKeyword:
-        insert_stmt = pg_insert(SearchKeyword).values(keyword=keyword).on_conflict_do_nothing(
-            index_elements=["keyword"]
+
+                except Exception:
+                    logger.exception(
+                        "Discovery failed: platform='%s' keyword='%s'",
+                        scraper.source_name,
+                        keyword,
+                    )
+                    stats.errors += 1
+                    await session.rollback()
+                
+                finally:
+                    total_stats.pages_fetched += stats.pages_fetched
+                    total_stats.summaries_seen += stats.summaries_seen
+                    total_stats.jobs_created += stats.jobs_created
+                    total_stats.jobs_updated += stats.jobs_updated
+                    total_stats.links_added += stats.links_added
+                    total_stats.errors += stats.errors
+
+        return total_stats
+    
+    async def _get_or_create_keyword(
+            self,
+            keyword: str,
+            session: AsyncSession,
+    ) -> SearchKeyword:
+        insert_stmt = (
+            pg_insert(SearchKeyword)
+            .values(keyword=keyword)
+            .on_conflict_do_nothing(index_elements=["keyword"])
         )
         await session.execute(insert_stmt)
-        await session.commit()
 
         result = await session.execute(
-            select(SearchKeyword).where(SearchKeyword.keyword == keyword)
+            select(ScraperManager).where(SearchKeyword.keyword == keyword)
         )
         return result.scalar_one()
     
@@ -76,7 +198,7 @@ class ScraperManager:
             summary: JobSummary,
             keyword_id: int,
             session: AsyncSession,
-    ) -> None:
+    ) -> Tuple[bool, bool]:
         result = await session.execute(
             select(Job).where(
                 Job.platform == platform,
@@ -84,127 +206,70 @@ class ScraperManager:
             )
         )
         job: Optional[Job] = result.scalar_one_or_none()
-        if job is None:
-            insert_stmt = pg_insert(Job).values(
-                platform=platform,
-                platform_job_id=summary.platform_job_id,
-                title=summary.title,
-                description="",
-                company_name="",
-                location=summary.location,
-                external_activated_at=summary.external_activated_at,
-                expires_at=summary.expires_at,
-                is_expired=summary.is_expired,
-                last_seen_at=datetime.utcnow(),
-                status=JobStatus.PENDING_DETAIL,
-            ).on_conflict_do_nothing(constraint="uq_job_platform_id")
-            await session.execute(insert_stmt)
-            await session.commit()
 
-            result = await session.execute(
-                select(Job).where(
-                    Job.platform == platform,
-                    Job.platform_job_id == summary.platform_job_id,
+        if job is None:
+            insert_stmt = (
+                pg_insert(Job)
+                .values(
+                    platform=platform,
+                    platform_job_id=summary.platform_job_id,
+                    title=summary.title,
+                    description="",
+                    company_name="",
+                    location=summary.location,
+                    external_activated_at=summary.external_activated_at,
+                    expires_at=summary.expires_at,
+                    is_expired=summary.is_expired,
+                    last_seen_at=_utcnow(),
+                    status=JobStatus.PENDING_DETAIL,
                 )
+                .on_conflict_do_nothing(constraint="uq_job_platform_id")
+                .returning(Job.id)
             )
-            job = result.scalar_one()
+
+            result = await session.execute(insert_stmt)
+            inserted_id = result.scalar_one_or_none()
+
+            if inserted_id is None:
+                result = await session.execute(
+                    select(Job.id).where(
+                        Job.platform == platform,
+                        Job.platform_job_id == summary.platform_job_id,
+                    )
+                )
+                job_id = result.scalar_one()
+                created = False
+            else:
+                job_id = inserted_id
+                created = True
         else:
-            job.last_seen_at = datetime.utcnow
+            job_id = job.id
+            created = False
+
+            previous_activation = job.external_activated_at
+
+            job.last_seen_at = _utcnow()
             job.is_expired = summary.is_expired
             job.expires_at = summary.expires_at
 
-            if (
-                job.status == JobStatus.ENRICHED
-                and summary.external_activated_at != job.external_activated_at
+            activation_changed = summary.external_activated_at != previous_activation
+
+            if activation_changed and job.status in (
+                JobStatus.ENRICHED,
+                JobStatus.FAILED,
+                JobStatus.NEEDS_RECHECK,
             ):
                 job.status = JobStatus.NEEDS_RECHECK
+            
             job.external_activated_at = summary.external_activated_at
             session.add(job)
-            await session.commit()
         
-        link_stmt = pg_insert(JobKeywordLink).values(
-            job_id=job.id , keyword_id=keyword_id
-        ).on_conflict_do_nothing()
-        await session.execute(link_stmt)
-        await session.commit()    
-
-
-
-    async def run_enrichment(self, session: AsyncSession) -> None:
-        jobs = await self._get_jobs_needing_enrichment(session)
-        logger.info("Found %d job(s) needing enrichment", len(jobs))
-
-        for job in jobs:
-            scraper = self.scrapers.get(job.platform)
-            if scraper is None:
-                logger.error("No scraper registered for platform '%s'", job.platform)
-                job.status = JobStatus.FAILED
-                session.add(job)
-                await session.commit()
-                continue
-
-            detail = await scraper.fetch_detail(job.platform_job_id)
-            if detail is None:
-                job.status = JobStatus.FAILED
-                session.add(job)
-                session.commit()
-                continue
-
-            new_hash = self._compute_content_hash(detail.title, detail.description, detail.salary)
-
-            if job.status == JobStatus.NEEDS_RECHECK and new_hash == job.content_hash:
-                job.status =  JobStatus.ENRICHED
-                job.scraped_at = datetime.utcnow()
-                session.add(job)
-                await session.commit()
-                logger.info(
-                    "Job %s unchanged after recheck, skipped AI pipeline", job.platform_job_id
-                )
-                continue
-
-            try:
-                extracted = await self.ai_analyzer.extract_structured(detail.description)
-                vector = await self.ai_analyzer.embed_skills(
-                    extracted.get("tools_and_technologies", [])
-                )
-            except Exception: # noqa: BELE001
-                logger. exception("AI pipeline failed for job_id=%s", job.platform_job_id)
-                job.status = JobStatus.FAILED
-                session.add(job)
-                await session.commit()
-                continue
-
-            job.title = detail.title
-            job.description = detail.description
-            job.company_name = detail.company_name
-            job.company_about = detail.company_about
-            job.salary = detail.salary
-            job.location = detail.location
-
-            job.tools_and_technologies = extracted.get("tools_and_technologies", [])
-            job.competencies = extracted.get("competencies", [])
-            job.soft_skills = extracted.get = extracted.get("soft_skills", [])
-            job.domain = extracted.get("domain")
-            job.seniority_level = extracted.get("seniority_level", "unspecified")
-            job.skills_vector = vector
-
-            job.content_hash = new_hash
-            job.scraped_at = datetime.utcnow()
-            job.status = JobStatus.ENRICHED
-
-            session.add(job)
-            await session.commit()
-            logger.info("Enriched job_id=%s (%s)", job.platform_job_id, job.title)
-
-    async def _get_jobs_needing_enrichment(self, session: AsyncSession) -> List[Job]:
-        result = await session.execute(
-            select(Job).where(
-                Job.status.in_([JobStatus.PENDING_DETAIL, JobStatus.NEEDS_RECHECK])
-            )
+        link_stmt = (
+            pg_insert(JobKeywordLink)
+            .values(job_id=job_id, keyword_id=keyword_id)
+            .on_conflict_do_nothing()
         )
-        return list(result.scalars().all())
-    
-    @staticmethod
-    def _compute_content_hash(title: str, description: str, salary: Optional[str]) -> str:
-        raw = f"{title}|{description}|{salary or ''}"
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()     
+        link_result = await session.execute(link_stmt)
+        link_created = (link_result.rowcount or 0) > 0
+
+        return created, link_created
