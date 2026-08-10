@@ -273,3 +273,113 @@ class ScraperManager:
         link_created = (link_result.rowcount or 0) > 0
 
         return created, link_created
+    
+
+    # Enrichment
+
+    async def run_enrichment(
+            self,
+            session: AsyncSession,
+            concurrency: Optional[int] = None,
+            batch_size: Optional[int] = None,
+    ) -> EnrichmentStats:
+        
+        effective_concurrency = max(
+            1,
+            concurrency or settings.ENRICHMENT_CONCURRENCY,
+        )
+
+        effective_batch_size = max(
+            1,
+            batch_size or settings.ENRICHMENT_BATCH_SIZE,
+        )
+
+        jobs = await self._get_jobs_needing_enrichment(
+            session,
+            effective_batch_size
+        )
+
+        stats = EnrichmentStats(jobs_found=len(jobs))
+
+        logger.info(
+            "Enrichment started: found=%d concurrency=%d batch_size=%d",
+            stats.jobs_found,
+            effective_concurrency,
+            effective_batch_size,
+        )
+
+        if not jobs:
+            return stats
+        
+        semaphore = asyncio.Semaphore(effective_concurrency)
+
+        results = await asyncio.gather(
+            *(self._enrich_network_only(job, semaphore) for job in jobs),
+            return_exceptions=True,
+        )
+
+        for job, result in zip(jobs, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Unexpected enrichment task failed for job_id=%s: %s",
+                    job.platform_job_id,
+                    result,
+                    exc_info=result,
+                )
+                result = {"outcome": "failed"}
+            
+            if not isinstance(result, dict):
+                result = {"outcome": "failed"}
+            
+            outcome = result.get("outcome", "failed")
+
+            try:
+                await self._apply_enrichment_result(job, result, session)
+            except Exception:
+                logger.exception(
+                    "Failed to apply enrichment result for job_id=%s",
+                    job.platform_job_id,
+                )
+                await session.rollback()
+                stats.failed += 1
+                continue
+
+            if outcome == "enriched":
+                stats.enriched += 1
+            elif outcome == "unchanged":
+                stats.unchanged +=1
+            else:
+                stats.failed +=1
+        
+        logger.info(
+            "Enrichment finished: found=%d enriched=%d unchanged=%d failed=%d",
+            stats.jobs_found,
+            stats.enriched,
+            stats.unchanged,
+            stats.failed,
+        )
+        
+        return stats
+    
+    async def _get_jobs_needing_enrichment(
+            self,
+            session: AsyncSession,
+            batch_size: int,
+    ) -> List[Job]:
+        
+        stmt = (
+            select(Job)
+            .where(
+                Job.status.in_(
+                    [
+                        JobStatus.PENDING_DETAIL,
+                        JobStatus.NEEDS_RECHECK,
+                    ]
+                )
+            )
+            .order_by(Job.last_seen_at.desc())
+            .limit(batch_size)
+        )
+
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
