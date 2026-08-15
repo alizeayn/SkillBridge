@@ -524,3 +524,13 @@ class ScraperManager:
                 job.platform_job_id,
                 job.title,
             )
+        
+
+        @staticmethod
+        def _comute_content_hash(
+                title: str,
+                description: str,
+                salary: Optional[str],
+        ) -> str:
+            raw = f"{title}|{description}|{salary or ''}"
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
