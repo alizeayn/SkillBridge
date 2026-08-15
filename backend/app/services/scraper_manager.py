@@ -380,6 +380,147 @@ class ScraperManager:
             .order_by(Job.last_seen_at.desc())
             .limit(batch_size)
         )
-
+        
         result = await session.execute(stmt)
         return list(result.scalars().all())
+    
+    async def _enrich_network_only(
+            self,
+            job: Job,
+            semaphore: asyncio.Semaphore,
+    ) -> Dict[str, Any]:
+        async with semaphore:
+            scraper = self.scrapers.get(job.platform)
+
+            if scraper is None:
+                logger.error(
+                    "No scraper registered for platform '%s'",
+                    job.platform,
+                )
+                return {"outcome": "no_scraper"}
+            
+            try:
+                detail = await scraper.fetch_detail(job.platform_job_id)
+            except Exception:
+                logger.exception(
+                    "Unexpected fetch_detail error for job_id=%s",
+                    job.platform_job_id,
+                )
+                return {"outcome": "fetch_failed"}
+            
+            if detail is None:
+                return {"outcome": "fetch_failed"}
+            
+            new_hash = self._comute_content_hash(
+                detail.title,
+                detail.description,
+                detail.salary,
+            )
+
+            if (
+                job.status == JobStatus.NEEDS_RECHECK
+                and new_hash == job.content_hash
+            ):
+                return {
+                    "outcome": "unchanged",
+                    "detail": detail,
+                    "content_hash": new_hash,
+                }
+            
+            try:
+                extracted = await self.ai_analyzer.extract_structured(
+                    detail.description
+                )
+                vector = await self.ai_analyzer.embed_skills(
+                    extracted.get("tools_and_technologies", [])
+                )
+            except Exception:
+                logger.exception(
+                    "AI pipeline failed for job_id=%s",
+                    job.platform_job_id,
+                )
+                return {"outcome": "ai_failed"}
+            
+            return {
+                "outcome": "enriched",
+                "detail": detail,
+                "extracted": extracted,
+                "vector": vector,
+                "content_hash": new_hash,
+            }
+
+        async def _apply_enrichment_result(
+                self,
+                job: Job,
+                result: Dict[str, Any],
+                session: AsyncSession,
+        ) -> None:
+            outcome = result.get("outcome", "failed")   
+
+            if outcome in FAILED_OUTCOMES:
+                job.status = JobStatus.FAILED
+                session.add(job)
+                await session.commit()
+
+                logger.warning(
+                    "Enrichment failed for job_id=%s outcome=%s",
+                    job.platform_job_id,
+                    outcome,
+                )
+                return
+            
+            if outcome == "unchanged":
+                job.status = JobStatus.ENRICHED
+                job.scraped_at = _utcnow()
+                session.add(job)
+                await session.commit()
+
+                logger.info(
+                    "Job %s unchanged after recheck, skipped AI pipeline",
+                    job.platform_job_id,
+                )
+                return
+            
+            if outcome != "enriched":
+                job.status = JobStatus.FAILED
+                session.add(job)
+                session.commit()
+
+                logger.warning(
+                    "Unknown enrichment outcome '%s' for job_id=%s",
+                    outcome,
+                    job.platform_job_id,
+                )
+                return
+            
+            detail = result["detail"]
+            extracted = result["extracted"]
+
+            job.title = detail.title
+            job.description = detail.description
+            job.company_name = detail.company_name
+            job.company_about = detail.company_about
+            job.salary = detail.salary
+
+            if detail.location:
+                job.location = detail.location
+
+            job.tools_and_technologies = extracted.get("tools_and_technologies", [])
+            job.competencies = extracted.get("competencies", [])
+            job.soft_skills = extracted.get("soft_skills", [])
+            job.domain = extracted.get("domain")
+            job.seniority_level = extracted.get("seniority_level", "unspecified")
+
+            job.skills_vector = result.get("vector")
+            job.content_hash = result.get("content_hash")
+            job.scraped_at = _utcnow()
+            job.status = JobStatus.ENRICHED
+
+            session.add(job)
+            await session.commit()
+
+            logger.info(
+                "Enriched job_id=%s (%s)",
+                job.platform_job_id,
+                job.title,
+            )
