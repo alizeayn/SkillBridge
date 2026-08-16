@@ -431,9 +431,20 @@ class ScraperManager:
                 extracted = await self.ai_analyzer.extract_structured(
                     detail.description
                 )
-                vector = await self.ai_analyzer.embed_skills(
-                    extracted.get("tools_and_technologies", [])
+                
+                tools = extracted.get("tools_and_technologies", [])
+                competencies = extracted.get("competencies", [])
+
+                canonical_tools = await self.skill_taxonomy.canonicalize(
+                    tools, category="tool"
                 )
+                canonical_competencies = await self.skill_taxonomy.canonicalize(
+                    competencies, category="competency"
+                )
+
+                all_skills = canonical_tools + canonical_competencies
+                vector = await self.ai_analyzer.embed_skills(all_skills)
+
             except Exception:
                 logger.exception(
                     "AI pipeline failed for job_id=%s",
