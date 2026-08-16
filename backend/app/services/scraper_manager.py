@@ -459,89 +459,77 @@ class ScraperManager:
                 "vector": vector,
                 "content_hash": new_hash,
             }
-
-        async def _apply_enrichment_result(
-                self,
-                job: Job,
-                result: Dict[str, Any],
-                session: AsyncSession,
-        ) -> None:
-            outcome = result.get("outcome", "failed")   
-
-            if outcome in FAILED_OUTCOMES:
-                job.status = JobStatus.FAILED
-                session.add(job)
-                await session.commit()
-
-                logger.warning(
-                    "Enrichment failed for job_id=%s outcome=%s",
-                    job.platform_job_id,
-                    outcome,
-                )
-                return
-            
-            if outcome == "unchanged":
-                job.status = JobStatus.ENRICHED
-                job.scraped_at = _utcnow()
-                session.add(job)
-                await session.commit()
-
-                logger.info(
-                    "Job %s unchanged after recheck, skipped AI pipeline",
-                    job.platform_job_id,
-                )
-                return
-            
-            if outcome != "enriched":
-                job.status = JobStatus.FAILED
-                session.add(job)
-                session.commit()
-
-                logger.warning(
-                    "Unknown enrichment outcome '%s' for job_id=%s",
-                    outcome,
-                    job.platform_job_id,
-                )
-                return
-            
-            detail = result["detail"]
-            extracted = result["extracted"]
-
-            job.title = detail.title
-            job.description = detail.description
-            job.company_name = detail.company_name
-            job.company_about = detail.company_about
-            job.salary = detail.salary
-
-            if detail.location:
-                job.location = detail.location
-
-            job.tools_and_technologies = extracted.get("tools_and_technologies", [])
-            job.competencies = extracted.get("competencies", [])
-            job.soft_skills = extracted.get("soft_skills", [])
-            job.domain = extracted.get("domain")
-            job.seniority_level = extracted.get("seniority_level", "unspecified")
-
-            job.skills_vector = result.get("vector")
-            job.content_hash = result.get("content_hash")
-            job.scraped_at = _utcnow()
-            job.status = JobStatus.ENRICHED
-
+    async def _apply_enrichment_result(
+            self,
+            job: Job,
+            result: Dict[str, Any],
+            session: AsyncSession,
+    ) -> None:
+        outcome = result.get("outcome", "failed")   
+        if outcome in FAILED_OUTCOMES:
+            job.status = JobStatus.FAILED
             session.add(job)
             await session.commit()
-
-            logger.info(
-                "Enriched job_id=%s (%s)",
+            logger.warning(
+                "Enrichment failed for job_id=%s outcome=%s",
                 job.platform_job_id,
-                job.title,
+                outcome,
             )
+            return
         
-
-        @staticmethod
-        def _comute_content_hash(
-                title: str,
-                description: str,
-                salary: Optional[str],
-        ) -> str:
-            raw = f"{title}|{description}|{salary or ''}"
-            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if outcome == "unchanged":
+            job.status = JobStatus.ENRICHED
+            job.scraped_at = _utcnow()
+            session.add(job)
+            await session.commit()
+            logger.info(
+                "Job %s unchanged after recheck, skipped AI pipeline",
+                job.platform_job_id,
+            )
+            return
+        
+        if outcome != "enriched":
+            job.status = JobStatus.FAILED
+            session.add(job)
+            session.commit()
+            logger.warning(
+                "Unknown enrichment outcome '%s' for job_id=%s",
+                outcome,
+                job.platform_job_id,
+            )
+            return
+        
+        detail = result["detail"]
+        extracted = result["extracted"]
+        job.title = detail.title
+        job.description = detail.description
+        job.company_name = detail.company_name
+        job.company_about = detail.company_about
+        job.salary = detail.salary
+        if detail.location:
+            job.location = detail.location
+        job.tools_and_technologies = extracted.get("tools_and_technologies", [])
+        job.competencies = extracted.get("competencies", [])
+        job.soft_skills = extracted.get("soft_skills", [])
+        job.domain = extracted.get("domain")
+        job.seniority_level = extracted.get("seniority_level", "unspecified")
+        job.skills_vector = result.get("vector")
+        job.content_hash = result.get("content_hash")
+        job.scraped_at = _utcnow()
+        job.status = JobStatus.ENRICHED
+        session.add(job)
+        await session.commit()
+        logger.info(
+            "Enriched job_id=%s (%s)",
+            job.platform_job_id,
+            job.title,
+        )
+    
+    @staticmethod
+    def _comute_content_hash(
+            title: str,
+            description: str,
+            salary: Optional[str],
+    ) -> str:
+        raw = f"{title}|{description}|{salary or ''}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
