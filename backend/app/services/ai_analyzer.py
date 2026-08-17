@@ -120,3 +120,7 @@ class AIAnalyzer:
             max_tokens=EXTRACTION_MAX_TOKENS,
         )
         return response.choices[0].message.content or ""
+    
+
+    async def embed_skills(self, skills: List[str]) -> Optional[List[float]]:
+        
