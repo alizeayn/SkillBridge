@@ -188,7 +188,7 @@ class ScraperManager:
         await session.execute(insert_stmt)
 
         result = await session.execute(
-            select(ScraperManager).where(SearchKeyword.keyword == keyword)
+            select(SearchKeyword).where(SearchKeyword.keyword == keyword)
         )
         return result.scalar_one()
     
@@ -411,7 +411,7 @@ class ScraperManager:
             if detail is None:
                 return {"outcome": "fetch_failed"}
             
-            new_hash = self._comute_content_hash(
+            new_hash = self._compute_content_hash(
                 detail.title,
                 detail.description,
                 detail.salary,
@@ -526,7 +526,7 @@ class ScraperManager:
         )
     
     @staticmethod
-    def _comute_content_hash(
+    def _compute_content_hash(
             title: str,
             description: str,
             salary: Optional[str],
