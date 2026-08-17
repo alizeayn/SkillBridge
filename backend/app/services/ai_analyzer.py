@@ -123,4 +123,44 @@ class AIAnalyzer:
     
 
     async def embed_skills(self, skills: List[str]) -> Optional[List[float]]:
-        
+        if not skills:
+            return None
+
+        seen: set[str] = set()
+        unique_skills: List[str] = []
+        for skill in skills:
+            if not isinstance(skill, str):
+                continue
+            normalized = skill.strip().lower()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique_skills.append(skill.strip())
+
+        if not unique_skills:
+            return None
+
+        text = ", ".join(unique_skills)
+
+        try:
+            return await self._call_embedding_llm(text)
+        except Exception:
+            logger.exception("Embedding LLM call failed after retries")
+            return None
+
+    @retry(
+        stop=stop_after_attempt(AI_MAX_RETRIES),
+        wait=wait_exponential(
+            multiplier=AI_RETRY_BACKOFF_FACTOR,
+            min=1,
+            max=30,
+        ),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _call_embedding_llm(self, text: str) -> List[float]:
+        response = await self.client.embeddings.create(
+            model=self.embedding_model,
+            input=text,
+        )
+        return response.data[0].embedding
