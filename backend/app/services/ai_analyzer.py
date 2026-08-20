@@ -164,3 +164,75 @@ class AIAnalyzer:
             input=text,
         )
         return response.data[0].embedding
+
+
+    @staticmethod
+    def _safe_parse_json(raw_content: str) -> Optional[Dict[str, Any]]:
+        if not raw_content:
+            return None
+
+        cleaned = raw_content.strip()
+
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+        try:
+            result = json.loads(cleaned)
+            return result if isinstance(result, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+                return result if isinstance(result, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return None
+
+    @staticmethod
+    def _normalize_extraction(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        tools = parsed.get("tools_and_technologies") or []
+        competencies = parsed.get("competencies") or []
+        soft_skills = parsed.get("soft_skills") or []
+        domain = parsed.get("domain")
+        seniority = parsed.get("seniority_level") or "unspecified"
+
+        tools = list(dict.fromkeys(
+            str(s).strip() for s in tools if s and str(s).strip()
+        ))
+        competencies = list(dict.fromkeys(
+            str(s).strip() for s in competencies if s and str(s).strip()
+        ))
+        soft_skills = list(dict.fromkeys(
+            str(s).strip() for s in soft_skills if s and str(s).strip()
+        ))
+
+        if domain is not None:
+            domain = str(domain).strip() or None
+
+        seniority = str(seniority).strip().lower()
+
+        if seniority not in VALID_SENIORITY_LEVELS:
+            seniority = "unspecified"
+
+        return {
+            "tools_and_technologies": tools,
+            "competencies": competencies,
+            "soft_skills": soft_skills,
+            "domain": domain,
+            "seniority_level": seniority,
+        }
+
+    @staticmethod
+    def _empty_extraction() -> Dict[str, Any]:
+        return {
+            "tools_and_technologies": [],
+            "competencies": [],
+            "soft_skills": [],
+            "domain": None,
+            "seniority_level": "unspecified",
+        }
